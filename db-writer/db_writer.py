@@ -10,7 +10,7 @@ from database.contest_repository import ContestRepository
 
 # 로깅 설정
 logger = logging.getLogger()
-logger.setLevel(logging.INFO)
+logger.setLevel(logging.DEBUG)
 
 # S3 클라이언트
 s3_client = boto3.client('s3')
@@ -32,8 +32,14 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
         
         # 1. 마감된 공모전 삭제 (일일 업데이트 시에만)
         from datetime import date
-        deleted_count = repository.delete_closed_contests(date.today())
-        logger.info(f"마감된 공모전 {deleted_count}개 삭제")
+        # 첫 번째 S3 객체 키를 확인하여 초기 백필인지 판단
+        first_key = event.get('Records', [{}])[0].get('s3', {}).get('object', {}).get('key', '')
+        if "initial_backfill" not in first_key:
+            deleted_count = repository.delete_closed_contests(date.today())
+            logger.info(f"마감된 공모전 {deleted_count}개 삭제")
+        else:
+            deleted_count = 0
+            logger.debug("Initial backfill - 마감된 공모전 삭제 스킵")
         
         # 2. S3 이벤트 처리
         total_saved = 0
@@ -132,12 +138,15 @@ def save_contests_to_db(repository: ContestRepository, data: Dict[str, Any]) -> 
    
     contests = data.get('contests', [])
     event_type = data.get('event_type', 'unknown')
-    
+
     logger.info(f"DB 저장 시작: {len(contests)}개 공모전 (이벤트: {event_type})")
-    
+
     # 배치 저장 사용 (성능 최적화)
-    saved_count, duplicate_count = repository.save_batch(contests)
-    
-    logger.info(f"DB 저장 완료: 저장={saved_count}, 중복={duplicate_count}")
+    try:
+        saved_count, duplicate_count = repository.save_batch(contests)
+        logger.info(f"DB 저장 완료: 저장={saved_count}, 중복={duplicate_count}")
+    except Exception as e:
+        logger.error(f"DB 저장 중 오류 발생: {e}", exc_info=True)
+        raise
     return saved_count, duplicate_count
 
