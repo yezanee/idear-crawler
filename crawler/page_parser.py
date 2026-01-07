@@ -6,6 +6,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from bs4 import BeautifulSoup
 import json
+from .pagination import PaginationValidator, PaginationConfig
 
 logger = logging.getLogger(__name__)
 
@@ -39,12 +40,20 @@ class LinkareerPageParser:
     
     def parse_list_page(self, page: int) -> List[str]:
         # 목록 페이지에서 공모전 URL 추출 (GraphQL API 사용)
+        
+        # 페이지 번호 유효성 검사
+        if not PaginationValidator.validate_page_number(page):
+            return []
 
         try:
             logger.info(f"{page}페이지 API 호출 시작")
             
-            # 1페이지는 28개, 2페이지부터는 20개로 고정
-            page_size = 28 if page == 1 else 20
+            # 페이지 크기 결정 (API 제약사항)
+            page_size = PaginationValidator.get_page_size(page)
+            logger.debug(f"페이지 {page}: 크기 {page_size}")
+            
+            # API 페이지 파라미터 변환
+            api_page = PaginationValidator.get_api_page_number(page)
             
             # GraphQL 쿼리 파라미터
             params = {
@@ -55,7 +64,7 @@ class LinkareerPageParser:
                         'activityTypeID': '3'  # 3 = 공모전
                     },
                     'pageSize': page_size,
-                    'page': page,
+                    'page': api_page,  # 0-based 인덱스로 변환
                     'activityOrder': {
                         'field': 'CREATED_AT',
                         'direction': 'DESC'
@@ -68,6 +77,8 @@ class LinkareerPageParser:
                     }
                 }, separators=(',', ':'))
             }
+            
+            logger.debug(f"API 호출: page={api_page} (사용자 페이지={page}), pageSize={page_size}")
             
             # API 호출
             response = self.session.get(

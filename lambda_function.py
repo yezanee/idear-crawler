@@ -12,7 +12,7 @@ from utils.s3_uploader import S3Uploader
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
-# CloudWatch 클라이언트
+# CloudWatch 클라이언트 (모니터링을 위해)
 cloudwatch = boto3.client('cloudwatch')
 
 

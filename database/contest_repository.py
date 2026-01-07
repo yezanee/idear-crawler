@@ -1,5 +1,9 @@
+"""
+공모전 데이터베이스 Repository
+Real MySQL 8.0 원칙에 따른 최적화 버전
+"""
 import logging
-from typing import Dict, Optional
+from typing import Dict, List, Optional
 from datetime import date
 import pymysql
 from pymysql.cursors import DictCursor
@@ -9,7 +13,13 @@ logger = logging.getLogger(__name__)
 
 
 class ContestRepository:
-    # 공모전 데이터베이스 Repository
+    """
+    공모전 데이터베이스 Repository
+    
+    필수 조건:
+    - contest 테이블에 linkareer_url UNIQUE INDEX가 설정되어 있어야 함
+    - 스키마는 database/schema.sql 참조
+    """
     
     def __init__(self, db_config: Dict):
         self.db_config = db_config
@@ -17,7 +27,7 @@ class ContestRepository:
         self._connect()
     
     def _connect(self):
-        # 데이터베이스 연결 생성
+        """데이터베이스 연결 생성"""
         try:
             self.connection = pymysql.connect(
                 host=self.db_config['host'],
@@ -39,7 +49,7 @@ class ContestRepository:
             raise
     
     def _ensure_connection(self):
-        # 연결 상태 확인 및 재연결
+        """연결 상태 확인 및 재연결"""
         try:
             if self.connection is None or not self.connection.open:
                 logger.warning("Database connection lost, reconnecting...")
@@ -53,7 +63,7 @@ class ContestRepository:
     
     @contextmanager
     def _get_cursor(self):
-        # 커서 컨텍스트 매니저
+        """커서 컨텍스트 매니저"""
         self._ensure_connection()
         cursor = self.connection.cursor()
         try:
@@ -61,61 +71,92 @@ class ContestRepository:
         finally:
             cursor.close()
     
+    # =========================================================================
+    # 조회 메서드
+    # =========================================================================
+    
     def exists_by_url(self, linkareer_url: str) -> bool:
-        # URL로 공모전 존재 여부 확인
+        """
+        URL로 공모전 존재 여부 확인
+        
+        인덱스 활용: idx_linkareer_url (UNIQUE)
+        - 커버링 인덱스로 동작하여 테이블 접근 없이 인덱스만으로 결과 반환
+        """
         try:
             with self._get_cursor() as cursor:
-                sql = "SELECT COUNT(*) as cnt FROM contest WHERE linkareer_url = %s"
+                # EXISTS 사용 시 첫 번째 매칭에서 즉시 반환 (COUNT보다 효율적)
+                sql = "SELECT EXISTS(SELECT 1 FROM contest WHERE linkareer_url = %s) as exist"
                 cursor.execute(sql, (linkareer_url,))
                 result = cursor.fetchone()
-                return result['cnt'] > 0
+                return result['exist'] == 1
         except Exception as e:
             logger.error(f"URL 존재 확인 실패: {e}")
             return False
     
     def exists_by_homepage_url(self, homepage_url: str) -> bool:
-        # 홈페이지 URL로 공모전 존재 여부 확인
-
+        """
+        홈페이지 URL로 공모전 존재 여부 확인
+        
+        인덱스 활용: idx_homepage_url
+        """
         if not homepage_url or not homepage_url.strip():
             return False
         
         try:
             with self._get_cursor() as cursor:
-                sql = "SELECT COUNT(*) as cnt FROM contest WHERE homepage_url = %s"
+                sql = "SELECT EXISTS(SELECT 1 FROM contest WHERE homepage_url = %s) as exist"
                 cursor.execute(sql, (homepage_url,))
                 result = cursor.fetchone()
-                return result['cnt'] > 0
+                return result['exist'] == 1
         except Exception as e:
             logger.error(f"홈페이지 URL 존재 확인 실패: {e}")
             return False
     
-    def save_if_not_duplicate(self, contest_data: Dict) -> bool:
-        # 중복이 아닌 경우에만 공모전 저장
+    def count(self) -> int:
+        """전체 공모전 개수 조회"""
         try:
-            # 링커리어 URL로 중복 체크 (필수)
-            linkareer_url = contest_data.get('linkareer_url')
-            if not linkareer_url:
-                logger.warning("linkareer_url이 없습니다")
-                return False
-            
-            if self.exists_by_url(linkareer_url):
-                logger.debug(f"중복 (linkareer_url): {linkareer_url}")
-                return False
-            
-            # 홈페이지 URL로 중복 체크 (선택)
-            homepage_url = contest_data.get('homepage_url')
-            if homepage_url and self.exists_by_homepage_url(homepage_url):
-                logger.debug(f"중복 (homepage_url): {homepage_url}")
-                return False
-            
-            # 저장
+            with self._get_cursor() as cursor:
+                sql = "SELECT COUNT(*) as cnt FROM contest"
+                cursor.execute(sql)
+                result = cursor.fetchone()
+                return result['cnt']
+        except Exception as e:
+            logger.error(f"공모전 개수 조회 실패: {e}")
+            return 0
+    
+    # =========================================================================
+    # 저장 메서드
+    # =========================================================================
+    
+    def save_if_not_duplicate(self, contest_data: Dict) -> bool:
+        """
+        중복이 아닌 경우에만 공모전 저장 (단건 UPSERT)
+        
+        인덱스 활용: idx_linkareer_url (UNIQUE)
+        - ON DUPLICATE KEY UPDATE 구문은 UNIQUE 인덱스가 필수
+        """
+        linkareer_url = contest_data.get('linkareer_url')
+        if not linkareer_url:
+            logger.warning("linkareer_url이 없습니다")
+            return False
+        
+        try:
             with self._get_cursor() as cursor:
                 sql = """
                     INSERT INTO contest 
                     (title, host, category, image_url, start_date, deadline, 
-                     reward, description, linkareer_url, homepage_url, 
-                     created_at, updated_at)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
+                     reward, description, linkareer_url, homepage_url)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON DUPLICATE KEY UPDATE
+                    title = VALUES(title),
+                    host = VALUES(host),
+                    category = VALUES(category),
+                    image_url = VALUES(image_url),
+                    start_date = VALUES(start_date),
+                    deadline = VALUES(deadline),
+                    reward = VALUES(reward),
+                    description = VALUES(description),
+                    homepage_url = VALUES(homepage_url)
                 """
                 
                 cursor.execute(sql, (
@@ -128,11 +169,11 @@ class ContestRepository:
                     contest_data.get('reward'),
                     contest_data.get('description'),
                     linkareer_url,
-                    homepage_url
+                    contest_data.get('homepage_url')
                 ))
                 
                 self.connection.commit()
-                logger.debug(f"공모전 저장 성공: {contest_data.get('title')}")
+                logger.debug(f"공모전 저장/업데이트 성공: {contest_data.get('title')}")
                 return True
                 
         except Exception as e:
@@ -144,45 +185,39 @@ class ContestRepository:
             return False
     
     def save_batch(self, contests: List[Dict]) -> tuple:
-        # 배치로 공모전 저장 (성능 최적화)
+        """
+        배치로 공모전 저장 (성능 최적화)
+        
+        인덱스 활용: idx_linkareer_url (UNIQUE)
+        - INSERT ... ON DUPLICATE KEY UPDATE 구문 사용
+        - executemany로 배치 처리하여 네트워크 왕복 최소화
+        
+        Returns:
+            tuple: (저장 성공 개수, 실패 개수)
+        """
         if not contests:
             return 0, 0
         
         try:
-            # 1. 중복 체크 (기존 URL 조회)
-            linkareer_urls = [c.get('linkareer_url') for c in contests if c.get('linkareer_url')]
-            
-            if not linkareer_urls:
-                logger.warning("유효한 linkareer_url이 없습니다")
-                return 0, len(contests)
-            
-            # 기존 URL 조회
-            with self._get_cursor() as cursor:
-                placeholders = ','.join(['%s'] * len(linkareer_urls))
-                sql = f"SELECT linkareer_url FROM contest WHERE linkareer_url IN ({placeholders})"
-                cursor.execute(sql, linkareer_urls)
-                existing_urls = {row['linkareer_url'] for row in cursor.fetchall()}
-            
-            # 2. 새로운 공모전만 필터링
-            new_contests = [
-                c for c in contests 
-                if c.get('linkareer_url') and c.get('linkareer_url') not in existing_urls
-            ]
-            
-            if not new_contests:
-                logger.info(f"모두 중복: {len(contests)}개")
-                return 0, len(contests)
-            
-            # 3. 배치 INSERT
             with self._get_cursor() as cursor:
                 sql = """
                     INSERT INTO contest 
                     (title, host, category, image_url, start_date, deadline, 
-                     reward, description, linkareer_url, homepage_url, 
-                     created_at, updated_at)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW())
+                     reward, description, linkareer_url, homepage_url)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON DUPLICATE KEY UPDATE
+                    title = VALUES(title),
+                    host = VALUES(host),
+                    category = VALUES(category),
+                    image_url = VALUES(image_url),
+                    start_date = VALUES(start_date),
+                    deadline = VALUES(deadline),
+                    reward = VALUES(reward),
+                    description = VALUES(description),
+                    homepage_url = VALUES(homepage_url)
                 """
                 
+                # URL이 없는 데이터는 제외
                 values = [
                     (
                         c.get('title'),
@@ -196,18 +231,26 @@ class ContestRepository:
                         c.get('linkareer_url'),
                         c.get('homepage_url')
                     )
-                    for c in new_contests
+                    for c in contests if c.get('linkareer_url')
                 ]
+                
+                if not values:
+                    logger.warning("유효한 데이터가 없습니다 (linkareer_url 누락)")
+                    return 0, 0
                 
                 cursor.executemany(sql, values)
                 self.connection.commit()
-            
-            saved_count = len(new_contests)
-            duplicate_count = len(contests) - saved_count
-            
-            logger.info(f"배치 저장 완료: 저장={saved_count}, 중복={duplicate_count}")
-            return saved_count, duplicate_count
-            
+                
+                # affected_rows 설명:
+                # - 1: 새 행 삽입
+                # - 2: 기존 행 업데이트
+                # - 0: 변경 없음 (데이터 동일)
+                total_affected = cursor.rowcount
+                logger.info(f"배치 저장 완료: {len(values)}개 시도, affected_rows={total_affected}")
+                
+                # UPSERT 방식이므로 모두 처리됨 (중복도 UPDATE로 처리)
+                return len(values), 0
+                
         except Exception as e:
             logger.error(f"배치 저장 실패: {e}", exc_info=True)
             try:
@@ -216,9 +259,18 @@ class ContestRepository:
                 pass
             return 0, len(contests)
     
+    # =========================================================================
+    # 삭제 메서드
+    # =========================================================================
+    
     def delete_closed_contests(self, today: date) -> int:
-        # 마감된 공모전 삭제
-
+        """
+        마감된 공모전 삭제
+        
+        인덱스 활용: idx_deadline
+        - 날짜 범위 검색에 B-Tree 인덱스 활용
+        - 주의: 삭제 대상이 전체의 20% 이상이면 Full Scan이 더 효율적일 수 있음
+        """
         try:
             with self._get_cursor() as cursor:
                 sql = "DELETE FROM contest WHERE deadline < %s"
@@ -234,20 +286,12 @@ class ContestRepository:
                 pass
             return 0
     
-    def count(self) -> int:
-        # 전체 공모전 개수 조회
-        try:
-            with self._get_cursor() as cursor:
-                sql = "SELECT COUNT(*) as cnt FROM contest"
-                cursor.execute(sql)
-                result = cursor.fetchone()
-                return result['cnt']
-        except Exception as e:
-            logger.error(f"공모전 개수 조회 실패: {e}")
-            return 0
+    # =========================================================================
+    # 리소스 관리
+    # =========================================================================
     
     def close(self):
-        # 데이터베이스 연결 종료
+        """데이터베이스 연결 종료"""
         if self.connection:
             try:
                 self.connection.close()

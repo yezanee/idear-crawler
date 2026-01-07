@@ -5,6 +5,7 @@ from datetime import date
 
 from .page_parser import LinkareerPageParser
 from .detail_parser import ContestDetailParser
+from .pagination import PaginationValidator, PaginationState, PaginationConfig, create_pagination_summary
 
 logger = logging.getLogger(__name__)
 
@@ -15,30 +16,58 @@ class LinkareerCrawler:
     def __init__(self):
         self.page_parser = None
         self.detail_parser = ContestDetailParser()
-        self.processed_urls: Set[str] = set()
+        # self.pagination_state = PaginationState()  # __init__에서 한 번만 초기화
     
     def initial_backfill(self, max_pages: Optional[int] = None) -> Dict:
         # 초기 백필 - 모든 공모전 데이터 수집
         start_time = time.time()
         logger.info("=== 초기 백필 시작 ===")
 
-        all_contests = []  # 모든 공모전 데이터 저장
-        pages_processed = 0
+        all_contests = []
+        
+        # PaginationState 상태 초기화 (중복 방지)
+        self.pagination_state.reset_empty_counter()
+        self.pagination_state.reset_duplicate_counter()
+        # processed_urls는 그대로 유지 (새로 초기화하지 않음)
+        # self.pagination_state = PaginationState()  # __init__에서 한 번만 초기화
 
         try:
             self.page_parser = LinkareerPageParser()
 
             page = 1
-            max_pages_limit = max_pages if max_pages else 50
+            max_pages_limit = PaginationValidator.calculate_max_pages(max_pages)
+            
+            logger.info(f"최대 페이지 수: {max_pages_limit}")
 
             while page <= max_pages_limit:
                 # 페이지 크롤링 시작
+                expected_items = PaginationValidator.get_page_size(page)
+                logger.debug(f"페이지 {page} 크롤링 시작 (예상 {expected_items}개)")
 
                 urls = self.page_parser.parse_list_page(page)
 
                 if not urls:
-                    logger.info(f"{page}페이지에 데이터 없음, 백필 종료")
-                    break
+                    self.pagination_state.increment_empty_counter()
+                    logger.warning(f"{page}페이지에 데이터 없음 (연속 빈 페이지: {self.pagination_state.empty_page_count})")
+                    
+                    if self.pagination_state.should_stop_on_empty_pages():
+                        logger.warning("연속 3페이지가 비어있어 백필 조기 종료")
+                        break
+                    
+                    page += 1
+                    continue
+                else:
+                    self.pagination_state.reset_empty_counter()
+                    actual_items = len(urls)
+                    
+                    # 페이지네이션 유효성 검사
+                    validation = PaginationValidator.validate_pagination_range(page, actual_items, expected_items)
+                    
+                    if validation['warnings']:
+                        for warning in validation['warnings']:
+                            logger.warning(f"페이지 {page}: {warning}")
+                    
+                    logger.info(f"페이지 {page} 완료: {actual_items}/{expected_items}개 수집")
 
                 # 배치 크롤링
                 page_contests = self._crawl_batch(urls)
@@ -98,16 +127,35 @@ class LinkareerCrawler:
         
         all_contests = []
         page = 1
-        consecutive_duplicates = 0  # 연속 중복 카운터
+        
+        # PaginationState 카운터 초기화 (기존 URL은 유지)
+        self.pagination_state.reset_empty_counter()
+        self.pagination_state.reset_duplicate_counter()
 
-        while page <= max_pages:
+        # 최대 페이지 수 제한 (안전장치)
+        max_pages_limit = PaginationValidator.calculate_max_pages(max_pages)  # LinkareerPageParser.MAX_PAGE_LIMIT와 동일
+
+        while page <= max_pages_limit:
             # 페이지 크롤링 시작
             
+            if not self.page_parser:
+                logger.error("Page parser가 초기화되지 않음")
+                break
+                
             urls = self.page_parser.parse_list_page(page)
             
             if not urls:
-                logger.info(f"{page}페이지에 데이터 없음, 크롤링 종료")
-                break
+                empty_page_count += 1
+                logger.info(f"{page}페이지에 데이터 없음 (연속 빈 페이지: {empty_page_count})")
+                
+                if empty_page_count >= 3:
+                    logger.warning("연속 3페이지가 비어있어 크롤링 조기 종료")
+                    break
+                    
+                page += 1
+                continue
+            else:
+                empty_page_count = 0
             
             # 배치 크롤링 (중복 체크 포함)
             page_contests, duplicates_found = self._crawl_batch_with_duplicate_check(urls)
@@ -117,15 +165,16 @@ class LinkareerCrawler:
             
             # 중복 체크: 페이지 전체가 중복이면 연속 중복 카운트 증가
             if duplicates_found > 0 and len(page_contests) == 0:
-                consecutive_duplicates += 1
+                self.pagination_state.increment_duplicate_counter()
                 logger.info(f"연속 중복 페이지: {consecutive_duplicates}/{stop_on_duplicates}")
                 
-                if consecutive_duplicates >= stop_on_duplicates:
+                if self.pagination_state.should_stop_on_duplicates(stop_on_duplicates):
                     logger.info(f"연속 {consecutive_duplicates}개 페이지가 모두 중복 → 크롤링 조기 종료")
                     break
-            else:
-                # 새 공모전이 있으면 카운터 리셋
-                consecutive_duplicates = 0
+                else:
+                    # 새 공모전이 있으면 카운터 리셋
+                    self.pagination_state.reset_duplicate_counter()                # 새 공모전이 있으면 카운터 리셋
+                # 기존 consecutive_duplicates는 PaginationState에서 관리
             
             page += 1
             time.sleep(0.5)
@@ -164,7 +213,7 @@ class LinkareerCrawler:
         
         for url in urls:
             # 중복 체크 (메모리)
-            if url in self.processed_urls:
+            if self.pagination_state.is_url_processed(url):
                 duplicate_count += 1
                 logger.debug(f"중복 URL 건너뜀: {url}")
                 continue
@@ -187,7 +236,7 @@ class LinkareerCrawler:
     def _crawl_single(self, url: str, max_retries: int = 3) -> Optional[Dict]:
         # 단일 URL 크롤링 (재시도 로직 포함)
         # 메모리 중복 체크
-        if url in self.processed_urls:
+        if self.pagination_state.is_url_processed(url):
             logger.debug(f"이미 처리한 URL: {url}")
             return None
         
@@ -199,18 +248,18 @@ class LinkareerCrawler:
                 
                 if contest_data:
                     logger.info(f"공모전 수집 성공: {contest_data.get('title', 'Unknown')}")
-                    self.processed_urls.add(url)
+                    self.pagination_state.mark_url_processed(url)
                     return contest_data
                 else:
                     logger.debug(f"데이터 없음: {url}")
-                    self.processed_urls.add(url)
+                    self.pagination_state.mark_url_processed(url)
                     return None
                     
             except Exception as e:
                 if attempt == max_retries - 1:
                     # 최종 실패
                     logger.error(f"크롤링 최종 실패 ({max_retries}회 재시도): {url} - {str(e)}")
-                    self.processed_urls.add(url)
+                    self.pagination_state.mark_url_processed(url)
                     return None
                 else:
                     # 재시도
