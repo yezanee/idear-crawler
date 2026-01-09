@@ -16,7 +16,7 @@ class LinkareerCrawler:
     def __init__(self):
         self.page_parser = None
         self.detail_parser = ContestDetailParser()
-        # self.pagination_state = PaginationState()  # __init__에서 한 번만 초기화
+        self.pagination_state = PaginationState()  # __init__에서 한 번만 초기화
     
     def initial_backfill(self, max_pages: Optional[int] = None) -> Dict:
         # 초기 백필 - 모든 공모전 데이터 수집
@@ -24,6 +24,7 @@ class LinkareerCrawler:
         logger.info("=== 초기 백필 시작 ===")
 
         all_contests = []
+        pages_processed = 0
         
         # PaginationState 상태 초기화 (중복 방지)
         self.pagination_state.reset_empty_counter()
@@ -127,6 +128,7 @@ class LinkareerCrawler:
         
         all_contests = []
         page = 1
+        pages_processed = 0
         
         # PaginationState 카운터 초기화 (기존 URL은 유지)
         self.pagination_state.reset_empty_counter()
@@ -145,7 +147,8 @@ class LinkareerCrawler:
             urls = self.page_parser.parse_list_page(page)
             
             if not urls:
-                empty_page_count += 1
+                self.pagination_state.increment_empty_counter()
+                empty_page_count = self.pagination_state.empty_page_count
                 logger.info(f"{page}페이지에 데이터 없음 (연속 빈 페이지: {empty_page_count})")
                 
                 if empty_page_count >= 3:
@@ -155,7 +158,7 @@ class LinkareerCrawler:
                 page += 1
                 continue
             else:
-                empty_page_count = 0
+                self.pagination_state.reset_empty_counter()
             
             # 배치 크롤링 (중복 체크 포함)
             page_contests, duplicates_found = self._crawl_batch_with_duplicate_check(urls)
@@ -166,6 +169,7 @@ class LinkareerCrawler:
             # 중복 체크: 페이지 전체가 중복이면 연속 중복 카운트 증가
             if duplicates_found > 0 and len(page_contests) == 0:
                 self.pagination_state.increment_duplicate_counter()
+                consecutive_duplicates = self.pagination_state.consecutive_duplicates
                 logger.info(f"연속 중복 페이지: {consecutive_duplicates}/{stop_on_duplicates}")
                 
                 if self.pagination_state.should_stop_on_duplicates(stop_on_duplicates):

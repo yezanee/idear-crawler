@@ -7,6 +7,7 @@ from urllib3.util.retry import Retry
 from bs4 import BeautifulSoup
 import json
 from .pagination import PaginationValidator, PaginationConfig
+from . import filter_config
 
 logger = logging.getLogger(__name__)
 
@@ -100,20 +101,72 @@ class LinkareerPageParser:
                 logger.info(f"{page}페이지에 데이터 없음")
                 return []
             
-            # URL 목록 생성
+            # URL 목록 생성 (Stage 1 필터링 적용)
             urls = []
+            stage1_filtered = 0
+            
             for activity in activities:
                 activity_id = activity.get('id')
-                if activity_id:
-                    url = f"{self.BASE_URL}/activity/{activity_id}"
-                    urls.append(url)
+                if not activity_id:
+                    continue
+                
+                # Stage 1: 목록 페이지에서 1차 필터링
+                # API 응답에 title이 있다면 사용, 없으면 필터링 스킵
+                if self._should_skip_activity(activity):
+                    stage1_filtered += 1
+                    title = activity.get('title', activity_id)
+                    logger.debug(f"1차 필터링: {title} (ID: {activity_id})")
+                    continue
+                
+                url = f"{self.BASE_URL}/activity/{activity_id}"
+                urls.append(url)
             
-            logger.info(f"{page}페이지에서 {len(urls)}개의 URL 발견")
+            if stage1_filtered > 0:
+                logger.info(f"{page}페이지: {len(activities)}개 중 {stage1_filtered}개 1차 필터링, {len(urls)}개 상세 크롤링 예정")
+            else:
+                logger.info(f"{page}페이지에서 {len(urls)}개의 URL 발견")
+            
             return urls
             
         except Exception as e:
             logger.error(f"{page}페이지 크롤링 실패: {str(e)}", exc_info=True)
             return []
+    
+    def _should_skip_activity(self, activity: dict) -> bool:
+        """
+        Stage 1: 목록 페이지에서 1차 필터링
+        
+        명확한 키워드만 사용하여 보수적으로 필터링 (오탐 방지)
+        - 테스트 데이터
+        - 명확한 비공모전 (마라톤, 채용 등)
+        
+        Args:
+            activity: API 응답의 activity 객체
+        
+        Returns:
+            bool: 필터링해야 하면 True, 통과시키면 False
+        """
+        # API 응답에서 title 추출 (없으면 필터링 스킵)
+        title = activity.get('title', '')
+        if not title or not isinstance(title, str):
+            return False  # title이 없으면 필터링하지 않음 (보수적 접근)
+        
+        title_lower = title.lower()
+        
+        # 1. 명확한 테스트 데이터 필터링
+        for keyword in filter_config.STAGE1_TEST_KEYWORDS:
+            if keyword in title_lower:
+                logger.debug(f"Stage 1 필터링 (테스트): '{title}' (키워드: {keyword})")
+                return True
+        
+        # 2. 명확한 비공모전 필터링
+        for keyword in filter_config.STAGE1_NON_IDEA_KEYWORDS:
+            if keyword in title_lower:
+                logger.debug(f"Stage 1 필터링 (비공모전): '{title}' (키워드: {keyword})")
+                return True
+        
+        # 모든 검사 통과 - 상세 크롤링 진행
+        return False
     
     def cleanup(self):
         # 리소스 정리

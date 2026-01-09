@@ -6,6 +6,8 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from bs4 import BeautifulSoup
 
+from . import filter_config
+
 logger = logging.getLogger(__name__)
 
 
@@ -77,6 +79,11 @@ class ContestDetailParser:
                 'linkareer_url': url,
                 'homepage_url': homepage_url
             }
+            
+            # 유효성 검증 (필터링)
+            if not self._validate_contest_data(contest_data):
+                logger.warning(f"필터링됨: {title} (유효하지 않은 공모전)")
+                return None
             
             logger.debug(f"크롤링 완료: {title}")
             return contest_data
@@ -239,6 +246,62 @@ class ContestDetailParser:
             logger.warning(f"날짜 파싱 실패: {date_str} - {e}")
         
         return None
+    
+    def _validate_contest_data(self, contest_data: Dict) -> bool:
+        """
+        공모전 데이터 유효성 검증 및 필터링
+        
+        필터링 대상:
+        1. 테스트/승인되지 않은 데이터
+        2. 아이디어 활용 불가능한 대회 (마라톤, 체육 대회 등)
+        3. 필수 정보 누락
+        
+        Returns:
+            bool: 유효하면 True, 필터링 대상이면 False
+        """
+        title = contest_data.get('title', '').strip()
+        category = contest_data.get('category', '').strip()
+        description = contest_data.get('description', '').strip()
+        
+        # 1. 필수 정보 검증
+        if not title:
+            logger.debug("필터링: 제목 없음")
+            return False
+        
+        # 2. 테스트/승인되지 않은 데이터 필터링
+        if filter_config.ENABLE_TEST_FILTER:
+            title_lower = title.lower()
+            for keyword in filter_config.TEST_KEYWORDS:
+                if keyword in title_lower:
+                    logger.info(f"필터링: 테스트 데이터 감지 - '{title}' (키워드: {keyword})")
+                    return False
+        
+        # 3. 아이디어 활용 불가능한 대회 필터링
+        if filter_config.ENABLE_NON_IDEA_FILTER:
+            # 제목과 카테고리에서 키워드 검색
+            combined_text = f"{title.lower()} {category.lower()}"
+            
+            for keyword in filter_config.NON_IDEA_KEYWORDS:
+                if keyword in combined_text:
+                    logger.info(f"필터링: 비공모전 감지 - '{title}' (키워드: {keyword})")
+                    return False
+        
+        # 4. 카테고리 기반 필터링
+        if filter_config.ENABLE_CATEGORY_FILTER:
+            category_lower = category.lower()
+            for invalid_cat in filter_config.INVALID_CATEGORIES:
+                if invalid_cat in category_lower:
+                    logger.info(f"필터링: 유효하지 않은 카테고리 - '{title}' (카테고리: {category})")
+                    return False
+        
+        # 5. 설명이 너무 짧은 경우 (스팸 가능성)
+        if filter_config.ENABLE_DESCRIPTION_FILTER:
+            if description and len(description) < filter_config.MIN_DESCRIPTION_LENGTH:
+                logger.debug(f"필터링: 설명이 너무 짧음 - '{title}' (길이: {len(description)})")
+                return False
+        
+        # 모든 검증 통과
+        return True
     
     def cleanup(self):
         # 리소스 정리
