@@ -60,7 +60,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             total_saved += saved
             total_duplicates += duplicates
         
-        logger.info(f"[METRICS] DB 저장 완료: 삭제={deleted_count}, 저장={total_saved}, 중복={total_duplicates}")
+        logger.info(f"[METRICS] DB 저장 완료: 비활성화={deleted_count}, 저장={total_saved}, 중복={total_duplicates}")
         
         return {
             'statusCode': 200,

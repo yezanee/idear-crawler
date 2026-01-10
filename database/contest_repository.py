@@ -145,8 +145,8 @@ class ContestRepository:
                 sql = """
                     INSERT INTO contest 
                     (title, host, category, image_url, start_date, deadline, 
-                     reward, description, linkareer_url, homepage_url)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                     reward, description, linkareer_url, homepage_url, is_active)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 1)
                     ON DUPLICATE KEY UPDATE
                     title = VALUES(title),
                     host = VALUES(host),
@@ -156,7 +156,8 @@ class ContestRepository:
                     deadline = VALUES(deadline),
                     reward = VALUES(reward),
                     description = VALUES(description),
-                    homepage_url = VALUES(homepage_url)
+                    homepage_url = VALUES(homepage_url),
+                    is_active = 1
                 """
                 
                 cursor.execute(sql, (
@@ -203,8 +204,8 @@ class ContestRepository:
                 sql = """
                     INSERT INTO contest 
                     (title, host, category, image_url, start_date, deadline, 
-                     reward, description, linkareer_url, homepage_url)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                     reward, description, linkareer_url, homepage_url, is_active)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 1)
                     ON DUPLICATE KEY UPDATE
                     title = VALUES(title),
                     host = VALUES(host),
@@ -214,7 +215,8 @@ class ContestRepository:
                     deadline = VALUES(deadline),
                     reward = VALUES(reward),
                     description = VALUES(description),
-                    homepage_url = VALUES(homepage_url)
+                    homepage_url = VALUES(homepage_url),
+                    is_active = 1
                 """
                 
                 # URL이 없는 데이터는 제외
@@ -273,10 +275,10 @@ class ContestRepository:
         """
         try:
             with self._get_cursor() as cursor:
-                sql = "DELETE FROM contest WHERE deadline < %s"
+                sql = "UPDATE contest SET is_active = 0 WHERE deadline < %s"
                 affected = cursor.execute(sql, (today,))
                 self.connection.commit()
-                logger.info(f"마감된 공모전 {affected}개 삭제")
+                logger.info(f"마감된 공모전 {affected}개 비활성화 (Soft Delete)")
                 return affected
         except Exception as e:
             logger.error(f"마감 공모전 삭제 실패: {e}")
